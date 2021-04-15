@@ -1,9 +1,10 @@
 from typing import Optional
 import shutil
-
 import pathlib
 
 from kaggle import KaggleApi
+from torchvision.datasets import ImageFolder
+from torch.utils.data import Dataset
 
 def prepare_data(data_root_dir: pathlib.Path):
     kaggle = KaggleApi()
@@ -26,7 +27,12 @@ def prepare_data(data_root_dir: pathlib.Path):
 
     tmp_dir.rmdir()
 
-def get_waste_dataset(data_root_dir: Optional[str]):
+def get_waste_dataset(
+        data_root_dir: Optional[str] = None,
+        train: bool = True,
+        transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+) -> Dataset:
     if data_root_dir is None:
         root_dir = pathlib.Path(__file__).absolute().parents[2]
 
@@ -35,4 +41,15 @@ def get_waste_dataset(data_root_dir: Optional[str]):
     else:
         data_root_dir = pathlib.Path(data_root_dir)
 
-    prepare_data(data_root_dir)
+    if not data_root_dir.exists():
+        prepare_data(data_root_dir)
+
+    if train:
+        root = data_root_dir / 'TRAIN'
+    else:
+        root = data_root_dir / 'TEST'
+
+    return ImageFolder(
+        root, transform, target_transform
+    )
+        
