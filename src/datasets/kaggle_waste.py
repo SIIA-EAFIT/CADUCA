@@ -1,55 +1,112 @@
-from typing import Optional
+from typing import Optional, Union, Callable
 import shutil
 import pathlib
 
 from kaggle import KaggleApi
 from torchvision.datasets import ImageFolder
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, random_split, DataLoader
+import pytorch_lightning as pl
 
-def prepare_data(data_root_dir: pathlib.Path):
-    kaggle = KaggleApi()
-    kaggle.authenticate()
+class WasteDataModule(pl.LightningDataModule):
+    def __init__(
+            self,
+            data_root_dir: Union[str, pathlib.Path],
+            batch_size: int,
+            transform: Optional[Callable] = None,
+            train_size: Union[float, int] = 0.7,
+            num_workers: int = 0,
+    ):
+        super().__init__()
+        self._data_root_dir = pathlib.Path(data_root_dir)
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self._train_size = train_size
+
+        self.transforms = transform
+
+        self.idx_to_class = ['Organic', 'Recyclable']
     
-    kaggle.dataset_download_files(
-        'techsash/waste-classification-data',
-        path=data_root_dir,
-        quiet=False,
-        unzip=True
-    )
+    def prepare_data(self):
+        """
+        Things to do on 1 GPU/TPU not on every GPU/TPU in distributed mode, s.a. download.
+        """
+        if not self._data_root_dir.exists():
+            kaggle = KaggleApi()
+            kaggle.authenticate()
+    
+            kaggle.dataset_download_files(
+                'techsash/waste-classification-data',
+                path=self._data_root_dir,
+                quiet=False,
+                unzip=True
+            )
 
-    # post processing
-    shutil.rmtree(data_root_dir / 'dataset')
+            # post processing
+            shutil.rmtree(self._data_root_dir / 'dataset')
 
-    tmp_dir = (data_root_dir / 'DATASET')
+            tmp_dir = (self._data_root_dir / 'DATASET')
 
-    for split in tmp_dir.iterdir():
-        split.rename(data_root_dir / split.name)
+            for split in tmp_dir.iterdir():
+                split.rename(self._data_root_dir / split.name)
 
-    tmp_dir.rmdir()
+                tmp_dir.rmdir()
 
-def get_waste_dataset(
-        data_root_dir: Optional[str] = None,
-        train: bool = True,
-        transform: Optional[Callable] = None,
-        target_transform: Optional[Callable] = None,
-) -> Dataset:
-    if data_root_dir is None:
-        root_dir = pathlib.Path(__file__).absolute().parents[2]
+    def setup(self, _):
+        """ 
+        Things to do on every accelerator in distributed mode i.e. make assignments
+        """
+        whole_train_dataset = ImageFolder(
+            self._data_root_dir / 'TRAIN',
+            transform=self.transforms
+        )
 
-        data_root_dir = root_dir / 'data' / 'kaggle-waste-data'
-        data_root_dir.mkdir(exist_ok=True, parents=True)
-    else:
-        data_root_dir = pathlib.Path(data_root_dir)
-
-    if not data_root_dir.exists():
-        prepare_data(data_root_dir)
-
-    if train:
-        root = data_root_dir / 'TRAIN'
-    else:
-        root = data_root_dir / 'TEST'
-
-    return ImageFolder(
-        root, transform, target_transform
-    )
+        dataset_size = len(whole_train_dataset)
         
+        if isinstance(self._train_size, int):
+            if dataset_size < train_size:
+                raise ValueError('train size {train_size} is larger than {dataset_size}')
+            train_size = self._train_size
+        elif isinstance(self._train_size, float):
+            if self._train_size < 1:
+                train_size = int(self._train_size * dataset_size)
+            else:
+                raise ValueError('train size {train_size} is larger than 1')
+            
+        split_size = [train_size, dataset_size - train_size]
+        self._train_dataset, self._val_dataset = random_split(
+            whole_train_dataset, split_size
+        )
+        self._test_dataset = ImageFolder(
+            self._data_root_dir / 'TEST',
+            transform=self.transforms
+        )
+        
+        
+    def train_dataloader(self):
+        return DataLoader(
+            self._train_dataset,
+            self.batch_size,
+            shuffle=True,
+            pin_memory=True,
+            num_workers=self.num_workers
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self._val_dataset,
+            self.batch_size,
+            shuffle=False,
+            pin_memory=True,
+            num_workers=self.num_workers
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self._test_dataset,
+            self.batch_size,
+            shuffle=False,
+            pin_memory=True,
+            num_workers=self.num_workers
+        )
+
+    
